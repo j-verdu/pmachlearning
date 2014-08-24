@@ -1,0 +1,238 @@
+---
+title: 'Human activity recognition: weight lifting'
+author: "Joan Verdu, Practical Machine Learning, Data Science Specialization, Coursera"
+date: "Friday, August 22, 2014"
+output: html_document
+---
+
+This study is related to human activity recognition through personal activity devices. In this project, our goal was to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). 
+
+---
+
+# 1. Dataset
+
+Data consists of 160 variables, including variable 'classe' which is the 5 types of lifts that should be predicted from the other variables. There are 19622 observations in the train dataset, and 20 observation in the test dataset.
+
+```{r, results='hide'}
+train<-read.csv("pml-training.csv",na.strings=c("NA","","#DIV/0!"))
+test<-read.csv("pml-testing.csv",na.strings=c("NA","","#DIV/0!"))
+
+```
+
+
+# 2. Exploratory analysis
+
+## 2.1 Data cleaning
+
+We first explore all variables to eliminate near zero variance variables, and also variables highly correlated to other ones (r>0.9). We filled NA values using k-nearest-neighbour method.
+
+```{r, echo=FALSE, results='hide'}
+options(warn=-1)
+library(caret)
+library(ggplot2)
+```
+
+```{r, results='hide'}
+# check for empty variables
+prop.na<-rep(0,ncol(train))
+for (i in 1:ncol(train)){
+    prop.na[i]<-sum(is.na(train[i]))/nrow(train[i])
+}
+## 100 variables are empty or almost empty, and should be disregarded from the analysis
+## we focus on 60 remaing variables, includin the index (X) and the output (classe)
+index<-prop.na<0.2
+trainfilt<-train[index]
+testfilt<-test[index] #same with test data
+```
+
+---
+
+```{r, results='hide'}
+## Fill na values with KnnImpute of preProcess function
+class<-as.vector(sapply(trainfilt,class))
+trainfilt2<-trainfilt
+testfilt2<-testfilt
+for (i in 1:ncol(trainfilt)){
+    if (class[i]=="numeric") {
+        preobj<-preProcess(trainfilt[i],method="knnImpute")
+        trainfilt2[i]<-predict(preobj,trainfilt[i])
+        testfilt2[i]<- predict(preobj,testfilt[i])
+    }
+}
+rm(train,test,trainfilt,testfilt)
+
+##Check for 'near zero' covariates
+indexnzero<-nearZeroVar(trainfilt2)
+trainfilt2<-trainfilt2[-indexnzero]
+testfilt2<-testfilt2[-indexnzero]
+## eliminate index variable X, user, num_window, and time variables
+trainfilt2<-trainfilt2[-c(1:6)]
+testfilt2<-testfilt2[-c(1:6)]
+
+#check for highly correlated variables
+corel<-cor(trainfilt2[1:52])
+corel[upper.tri(corel)]<-NA # remove upper triangle matrix values
+diag(corel)<-NA #remove diagonal values
+checkcor<-which( abs(corel) > 0.9, arr.ind=T )
+checkcor2<-data.frame(checkcor)
+checkcor2$rowname<-colnames(corel)[checkcor2$row]
+checkcor2$colname<-colnames(corel)[checkcor2$col]
+print(checkcor2[,3:4])
+
+trainfilt2<-trainfilt2[-c(4,8:10,18,31,33)]
+testfilt2<-testfilt2[-c(4,8:10,18,31,33)]
+```
+
+Variables **total_accel_belt, accel_belt_y**, and **accel_belt_z** (highly correlated with roll belt) and accel_belt_x (correlated with pitch belt) were removed. Also **gyros_arm_x** (correlated with 'y'), **gyros_dumbbell_x** and **gyros_dumbbell_z** (correlated with gyros_forearm_z) were removed. 
+
+---
+
+This is the list of variable combination with correlation greater than 0.9 in absolute value.
+
+```{r, echo=FALSE}
+print(checkcor2[,3:4])
+```
+
+
+Next figure shows correlation values among 52 variables available so far, and the 11 pais of variables (in red) whose correlation is above 0.9 in absolute value.
+
+```{r, echo=FALSE}
+corel2<-corel[lower.tri(corel)]
+plot(corel2,ylab="Correlation",xlab="Variable combination", 
+     col = ifelse(abs(corel2) > 0.9,'red','green'), pch = 19)
+abline(0.9,0,col = "gray60")
+abline(-0.9,0,col = "gray60")
+```
+
+---
+
+## 2.2 Variable standarization
+
+We standarize numeric variables to mean=0 and std.dev=1.
+
+```{r, results='hide'}
+preObj<-preProcess(trainfilt2[1:45],method=c("center","scale"))
+trainfilt2[1:45]<-predict(preObj,trainfilt2[1:45])
+testfilt2[1:45]<-predict(preObj,testfilt2[1:45]) # also with test data
+```
+
+## 2.3 Model selection
+
+We split the cleaned train data into a subtrain and a subtest data, in order to run several models and choose the most accurate one.
+
+```{r, results='hide'}
+## data partition to select model
+subtrain<-createDataPartition(y=trainfilt2$classe,p=0.6,list=FALSE)
+trainstrain<-trainfilt2[subtrain,]
+trainstest<-trainfilt2[-subtrain,]
+```
+
+Using subtrain data we built four types of models (tree, LDA, QDA and random forests), and check its accuracy by predicting the subtest data, using `caret` package.
+
+```{r, results='hide'}
+set.seed(10)
+# Tree
+model1<-train(classe~.,data=trainstrain,method="rpart")
+pred1<-predict(model1,newdata=trainstest)
+res1<-confusionMatrix(pred1,trainstest$classe)
+
+# LDA
+model2 <- train(classe~.,data=trainstrain,method="lda")
+pred2<-predict(model2,newdata=trainstest)
+res2<-confusionMatrix(pred2,trainstest$classe)
+
+#  QDA
+model3 <- train(classe~.,data=trainstrain,method="qda")
+pred3<-predict(model3,newdata=trainstest)
+res3<-confusionMatrix(pred3,trainstest$classe)
+
+# random forest
+model4<-train(classe~.,data=trainstrain,method="rf",trControl=trainControl(number=10))
+pred4<-predict(model4,newdata=trainstest)
+res4<-confusionMatrix(pred4,trainstest$classe)
+```
+
+---
+
+The overall accuracy and accuracy by activity class is shown in this figure.
+
+```{r, echo=FALSE}
+tree<-c(res1$overall[1],res1$byClass[,8])
+lda<-c(res2$overall[1],res2$byClass[,8])
+qda<-c(res3$overall[1],res3$byClass[,8])
+rforest<-c(res4$overall[1],res4$byClass[,8])
+
+accuracy<-data.frame(tree,lda,qda,rforest)
+
+library(reshape2)
+accuracy$Accuracy<-row.names(accuracy)
+accuracy$Accuracy[1]<-"Overall"
+ac.long<-melt(accuracy)
+names(ac.long)<-c("Type","Model","Accuracy")
+ggplot(data=ac.long, aes(y=Accuracy,x=Model, fill=Type)) + 
+    geom_bar(stat="identity", position=position_dodge())+
+    scale_fill_manual(values=c("red", "blue","orange","green","purple","black"))
+```
+
+**Random forest** showed to be the most accurate model, reaching 99% of accuracy.
+
+---
+
+## 2.4 Final variable selection
+
+One the model is chosen, we try to reduce the number of dependent variables without loosing accuracy, in order to optimize its application. We use `varImp()` function from `caret` package. 
+
+```{r}
+vars<-varImp(model4)$importance
+vars$names<-rownames(vars)
+vars<-vars[order(vars[,1],decreasing=T),]
+names<-vars$names[vars[,1]>8]
+names2<-c(names,"classe") # add output
+```
+
+We rank the most important variables, and choose a threshold value of 8. Thus, we reduce variables from 44 to 21. We must check is there is a significant loss of accuracy by reducing the model to theses variables.
+
+---
+
+```{r}
+traincheck<-subset(trainstrain, select=names2)
+testcheck<-subset(trainstest, select=names2)
+model4bis<-train(classe~.,data=traincheck,method="rf",trControl=trainControl(number=10))
+pred4bis<-predict(model4bis,newdata=testcheck)
+res4bis<-confusionMatrix(pred4bis,testcheck$classe)
+```
+
+Overall accuracy has drop only 0.2%, and still above 99%.
+
+```{r, echo=FALSE}
+paste0("Complete rf model, accuracy: ", round(100*res4$overall[1],digits=2)," %")
+paste0("Reduced rf model, accuracy: ", round(100*res4bis$overall[1],digits=2)," %")
+```
+
+---
+
+We decide to built our final model using only these 21 variables, namely (ordered by importance):
+
+```{r,echo=FALSE}
+names
+```
+
+
+# 3. Final model
+
+Our final model is a **random forest**, using the 21 variables previously selected, in order to estimate 'classe' variable (5 types of barbelt lifts). 
+First we subset the train and test datasets to select 21 variables (plus variable 'classe'). Then we build a random forest model, and predict 'classe' values for our test dataset. This is the code and the final output.
+
+```{r}
+traindef<-subset(trainfilt2, select=names2)
+testdef<-subset(testfilt2, select=names)
+
+modeldef<-train(classe~.,data=traindef,method="rf",trControl=trainControl(number=10))
+preddef<-predict(modeldef,newdata=testdef)
+outdef<-confusionMatrix(modeldef)$table
+modeldef$finalModel
+modeldef
+```
+
+Random forests internally uses boostrap sample to construct each tree and estimates the OOB (out of bag) error, 0.57% in our model. This is an estimate of **out of sample error**, and thus there is no further need of cross validation, more details in <http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr>
+Finalmodel consists on 500 trees, with 2 variables tried at each split. Classification error ranges from 1% (class B) to 0.07% (class A).
